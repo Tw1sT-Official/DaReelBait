@@ -35,6 +35,7 @@ class AnglerStorage {
         'line_mono',
         'earthworms',
         'bread_dough',
+        'tool_scale_tape',
       ]);
       await _prefs!.setString(_keyEquippedRod, 'rod_bamboo');
       await _prefs!.setString(_keyEquippedLine, 'line_mono');
@@ -102,7 +103,7 @@ class AnglerStorage {
     return getOwnedItems().contains(itemId);
   }
 
-  static bool hasScaleAndTape() => hasItem('tool_scale_tape');
+  static bool hasScaleAndTape() => true; // Scale & Tape are free by default so player can always inspect stats!
   static bool hasCamera() => hasItem('tool_camera');
   static bool hasLogbook() => hasItem('tool_logbook');
   static bool hasDiary() => hasItem('tool_diary');
@@ -150,7 +151,12 @@ class AnglerStorage {
     }
   }
 
+  static bool isInfiniteBait(String baitId) {
+    return baitId == 'earthworms' || baitId == 'bread_dough';
+  }
+
   static int getBaitCount(String baitId) {
+    if (isInfiniteBait(baitId)) return 999;
     return getBaitInventory()[baitId] ?? 0;
   }
 
@@ -162,6 +168,9 @@ class AnglerStorage {
 
   static Future<bool> consumeEquippedBait() async {
     final currentBait = getEquippedBaitId();
+    if (isInfiniteBait(currentBait)) {
+      return true; // Infinite starter bait! Cannot be softlocked!
+    }
     final map = getBaitInventory();
     final count = map[currentBait] ?? 0;
     if (count <= 0) return false;

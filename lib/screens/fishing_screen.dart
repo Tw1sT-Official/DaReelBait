@@ -42,12 +42,18 @@ class _FishingScreenState extends State<FishingScreen> with SingleTickerProvider
   // Fishing Cycle & Physics
   FishingState _state = FishingState.idle;
   double _castProgress = 0.0;
-  double _tension = 0.4; // 0.0 to 1.0
+  double _tension = 0.45; // 0.0 to 1.0 (Sweet spot: 0.25 to 0.75)
   double _rodSteerAngle = 0.0; // -1.0 to 1.0
-  double _fishDistanceMeters = 22.0;
+  double _fishDistanceMeters = 14.0;
   double _fishLateralOffset = 0.0; // -1.0 to 1.0
   double _fishStamina = 1.0;
   bool _hasBobberSubmerged = false;
+
+  // Hold-to-Reel Mechanics
+  bool _isHoldingReel = false;
+  double _reelVisualAngle = 0.0;
+  double _hapticThrottle = 0.0;
+  double _escapeGraceTimer = 4.0; // 4 seconds warning before fish can escape
 
   // Realistic Pacing & Pity Timer
   double _waitTimer = 0.0;
@@ -55,10 +61,6 @@ class _FishingScreenState extends State<FishingScreen> with SingleTickerProvider
   double _nibbleTimer = 0.0;
   double _plungeTimer = 0.0;
   String? _targetFishSpeciesId;
-
-  // Reeling Touch Coordinates
-  double _lastCrankAngle = 0.0;
-  Offset? _crankCenter;
 
   @override
   void initState() {
@@ -121,13 +123,13 @@ class _FishingScreenState extends State<FishingScreen> with SingleTickerProvider
   void _startCast() async {
     if (_state != FishingState.idle) return;
 
-    // Check if player has bait remaining
+    // Check if player has bait remaining (Earthworms & Bread are infinite!)
     final hasBait = await AnglerStorage.consumeEquippedBait();
     if (!mounted) return;
     if (!hasBait) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('Out of ${_equippedBait.name}! Open Tackle Box to switch bait or visit Tackle Shack.'),
+          content: Text('Out of ${_equippedBait.name}! Switch to Earthworms (Unlimited) in your Tackle Box.'),
           backgroundColor: const Color(0xFFFF5252),
         ),
       );
@@ -138,34 +140,36 @@ class _FishingScreenState extends State<FishingScreen> with SingleTickerProvider
     setState(() {
       _state = FishingState.casting;
       _castProgress = 0.0;
-      _tension = 0.3;
+      _tension = 0.45;
       _hasBobberSubmerged = false;
-      _fishDistanceMeters = 20.0 + Random().nextDouble() * 10.0;
+      _fishDistanceMeters = 12.0 + Random().nextDouble() * 5.0; // 12m - 17m distance
       _fishLateralOffset = 0.0;
+      _escapeGraceTimer = 4.0;
+      _isHoldingReel = false;
     });
 
     // Cast animation
-    for (int i = 0; i < 20; i++) {
+    for (int i = 0; i < 15; i++) {
       await Future.delayed(const Duration(milliseconds: 30));
       if (!mounted || _state != FishingState.casting) return;
       setState(() {
-        _castProgress = (i + 1) / 20.0;
+        _castProgress = (i + 1) / 15.0;
       });
     }
 
     // Determine target fish from location & bait
     _chooseTargetFish();
 
-    // Set bite timer: 15s - 45s (60s pity limit)
+    // Set bite timer: 12s - 35s (60s max pity)
     final rand = Random();
     final activeSpecies = FishDatabase.getSpecies(_targetFishSpeciesId ?? 'bluegill');
     final lovesBait = activeSpecies.isFavoriteBait(_equippedBait.id);
-    final baseWait = lovesBait ? 14.0 + rand.nextDouble() * 16.0 : 22.0 + rand.nextDouble() * 26.0;
+    final baseWait = lovesBait ? 12.0 + rand.nextDouble() * 14.0 : 18.0 + rand.nextDouble() * 20.0;
 
     setState(() {
       _state = FishingState.waitingForBite;
       _waitTimer = 0.0;
-      _targetBiteTime = baseWait.clamp(12.0, 58.0);
+      _targetBiteTime = baseWait.clamp(10.0, 55.0);
     });
   }
 
@@ -177,9 +181,8 @@ class _FishingScreenState extends State<FishingScreen> with SingleTickerProvider
     }
 
     final rand = Random();
-    // Prioritize fish that love the equipped bait and are active at the current hour
     final matches = locationSpecies.where((s) => s.isFavoriteBait(_equippedBait.id)).toList();
-    if (matches.isNotEmpty && rand.nextDouble() < 0.65) {
+    if (matches.isNotEmpty && rand.nextDouble() < 0.70) {
       _targetFishSpeciesId = matches[rand.nextInt(matches.length)].id;
     } else {
       _targetFishSpeciesId = locationSpecies[rand.nextInt(locationSpecies.length)].id;
@@ -199,7 +202,7 @@ class _FishingScreenState extends State<FishingScreen> with SingleTickerProvider
   void _updateWaiting(double dt) {
     _waitTimer += dt;
 
-    // Pity trigger at 60s
+    // Pity trigger
     if (_waitTimer >= _targetBiteTime || _waitTimer >= 60.0) {
       HapticFeedback.lightImpact();
       _state = FishingState.nibbling;
@@ -212,9 +215,9 @@ class _FishingScreenState extends State<FishingScreen> with SingleTickerProvider
   void _updateNibble(double dt) {
     _nibbleTimer += dt;
 
-    if (_nibbleTimer < 2.5) {
-      // Bobber twitches lightly
-      if (Random().nextDouble() < 0.12) {
+    if (_nibbleTimer < 2.0) {
+      // Light nibbles
+      if (Random().nextDouble() < 0.15) {
         HapticFeedback.lightImpact();
       }
     } else {
@@ -225,11 +228,10 @@ class _FishingScreenState extends State<FishingScreen> with SingleTickerProvider
       }
 
       _plungeTimer += dt;
-      // 2.0-second window to flick up and set the hook
-      if (_plungeTimer > 2.0) {
-        // Missed the bite!
+      // Generous 2.5-second window to flick up or tap to set the hook
+      if (_plungeTimer > 2.5) {
         HapticFeedback.selectionClick();
-        _resetToIdle('The fish nibbled off the bait and darted away!');
+        _resetToIdle('The fish nibbled the bait away. Cast again!');
       }
     }
   }
@@ -238,9 +240,9 @@ class _FishingScreenState extends State<FishingScreen> with SingleTickerProvider
     if (_state != FishingState.nibbling) return;
 
     if (!_hasBobberSubmerged) {
-      // Flicked too early during light nibble!
+      // Flicked too early during light nibble
       HapticFeedback.mediumImpact();
-      _resetToIdle('Flicked too early! You pulled the lure right out of its mouth.');
+      _resetToIdle('Flicked too early! Wait for the bobber to plunge under.');
       return;
     }
 
@@ -248,75 +250,72 @@ class _FishingScreenState extends State<FishingScreen> with SingleTickerProvider
     HapticFeedback.heavyImpact();
     setState(() {
       _state = FishingState.reelingFight;
-      _tension = 0.5;
+      _tension = 0.45;
       _fishStamina = 1.0;
+      _escapeGraceTimer = 4.0;
+      _isHoldingReel = false;
     });
   }
 
   void _updateReelingFight(double dt) {
-    // Fish swims laterally
-    _fishLateralOffset += sin(_currentTime * 2.2) * dt * 0.8;
-    _fishLateralOffset = _fishLateralOffset.clamp(-1.0, 1.0);
+    // Fish swims left and right smoothly
+    _fishLateralOffset = sin(_currentTime * 1.8) * 0.85;
 
-    // Rod damping absorbs strain
-    final damping = 0.15 * _equippedRod.strengthRating;
-    _tension = (_tension - damping * dt).clamp(0.0, 1.0);
-
-    // Counter-steering bonus: steering opposite to fish reduces tension strain & drains stamina
-    final isCounterSteering = (_rodSteerAngle * _fishLateralOffset) < -0.1;
+    // Counter-steering check (steering opposite to fish direction)
+    final isCounterSteering = (_rodSteerAngle * _fishLateralOffset) < -0.05;
     if (isCounterSteering) {
-      _fishStamina = (_fishStamina - 0.25 * _equippedRod.strengthRating * dt).clamp(0.0, 1.0);
+      _fishStamina = (_fishStamina - 0.20 * _equippedRod.strengthRating * dt).clamp(0.0, 1.0);
     } else {
-      _fishStamina = (_fishStamina - 0.08 * dt).clamp(0.0, 1.0);
+      _fishStamina = (_fishStamina - 0.06 * dt).clamp(0.0, 1.0);
     }
 
-    // Line snap threshold improves with heavier line
-    final snapThreshold = (0.92 + (_equippedLine.strengthRating - 1.0) * 0.04).clamp(0.92, 0.99);
-    if (_tension >= snapThreshold) {
-      HapticFeedback.heavyImpact();
-      _resetToIdle('LINE SNAPPED! Strain exceeded ${_equippedLine.name} rating.');
-      return;
+    // HOLD TO REEL MECHANIC
+    if (_isHoldingReel) {
+      // Retrieve line steadily (approx 1.8m to 2.4m per second)
+      final retrieveRate = (1.8 + (_equippedRod.strengthRating * 0.3)) * dt;
+      _fishDistanceMeters = max(0.0, _fishDistanceMeters - retrieveRate);
+
+      // Cranking builds tension
+      _tension = (_tension + 0.30 * dt).clamp(0.0, 1.0);
+
+      // Rotate visual reel spool
+      _reelVisualAngle += dt * 10;
+
+      // Haptic tick
+      _hapticThrottle += dt;
+      if (_hapticThrottle > 0.12) {
+        HapticFeedback.selectionClick();
+        _hapticThrottle = 0.0;
+      }
+    } else {
+      // When not holding, drag lets tension drop back into safe green zone
+      final dropRate = 0.28 * dt;
+      _tension = (_tension - dropRate).clamp(0.0, 1.0);
     }
 
-    // Check hook spit on total slack
-    if (_tension <= 0.05 && _fishDistanceMeters > 3.0) {
-      _resetToIdle('HOOK SPIT! You gave the line too much slack.');
-      return;
+    // DANGER BUFFER: Check if tension is in dangerous slack (< 0.10) or dangerous strain
+    final maxStrain = (0.86 + (_equippedLine.strengthRating - 1.0) * 0.05).clamp(0.86, 0.98);
+    final isDanger = _tension > maxStrain || (_tension < 0.10 && _fishDistanceMeters > 2.0);
+
+    if (isDanger) {
+      _escapeGraceTimer -= dt;
+      if (_escapeGraceTimer <= 0.0) {
+        if (_tension > maxStrain) {
+          HapticFeedback.heavyImpact();
+          _resetToIdle('LINE SNAPPED! Tension exceeded ${_equippedLine.name} rating.');
+        } else {
+          _resetToIdle('HOOK SPIT! The line went too slack. Remember to keep reeling.');
+        }
+        return;
+      }
+    } else {
+      // Safe zone restores escape grace timer
+      _escapeGraceTimer = (_escapeGraceTimer + dt * 1.5).clamp(0.0, 4.0);
     }
 
     // Catch landed!
     if (_fishDistanceMeters <= 0.0) {
       _landCatch();
-    }
-  }
-
-  void _onReelCrankPanUpdate(DragUpdateDetails details) {
-    if (_state != FishingState.reelingFight) return;
-
-    final touchPos = details.localPosition;
-    _crankCenter ??= Offset(touchPos.dx, touchPos.dy);
-
-    final angle = atan2(touchPos.dy - _crankCenter!.dy, touchPos.dx - _crankCenter!.dx);
-    double deltaAngle = angle - _lastCrankAngle;
-
-    // Handle wrap-around
-    if (deltaAngle > pi) deltaAngle -= pi * 2;
-    if (deltaAngle < -pi) deltaAngle += pi * 2;
-
-    _lastCrankAngle = angle;
-
-    if (deltaAngle > 0.05) {
-      // Clockwise crank detected!
-      final crankSpeed = deltaAngle * 2.0;
-
-      // Crank pulls fish closer
-      final retrieveDistance = crankSpeed * 0.45;
-      _fishDistanceMeters = max(0.0, _fishDistanceMeters - retrieveDistance);
-
-      // Cranking increases tension
-      _tension = (_tension + 0.04 * crankSpeed).clamp(0.0, 1.0);
-
-      HapticFeedback.selectionClick();
     }
   }
 
@@ -334,6 +333,7 @@ class _FishingScreenState extends State<FishingScreen> with SingleTickerProvider
 
     setState(() {
       _state = FishingState.catchLanded;
+      _isHoldingReel = false;
     });
 
     showDialog(
@@ -355,11 +355,12 @@ class _FishingScreenState extends State<FishingScreen> with SingleTickerProvider
     setState(() {
       _state = FishingState.idle;
       _hasBobberSubmerged = false;
-      _tension = 0.3;
+      _tension = 0.45;
+      _isHoldingReel = false;
     });
 
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(reason), backgroundColor: const Color(0xFFC62828)),
+      SnackBar(content: Text(reason), backgroundColor: const Color(0xFFC62828), duration: const Duration(seconds: 3)),
     );
   }
 
@@ -368,12 +369,10 @@ class _FishingScreenState extends State<FishingScreen> with SingleTickerProvider
     final location = FishingLocation.getLocation(_locationId);
     final hasWatch = AnglerStorage.hasWatch();
 
-    // Time Formatting
     final hourStr = _now.hour.toString().padLeft(2, '0');
     final minStr = _now.minute.toString().padLeft(2, '0');
     final timeStr = '$hourStr:$minStr';
 
-    // Solunar Barometer
     String activityText = 'Normal Activity';
     if (_now.hour >= 17 && _now.hour <= 19) {
       activityText = 'Peak Feeding Frenzy 🔥';
@@ -501,24 +500,26 @@ class _FishingScreenState extends State<FishingScreen> with SingleTickerProvider
 
                   const Spacer(),
 
-                  // Fighting HUD: Tension Gauge & Distance
+                  // Fighting HUD: Tension Gauge & Guidance
                   if (_state == FishingState.reelingFight) ...[
                     _buildFightTensionGauge(),
+                    const SizedBox(height: 8),
+                    _buildSteeringGuidanceBanner(),
                     const SizedBox(height: 12),
                   ],
 
-                  // Hook-set Action Prompt
+                  // Hook-set Action Prompt (Plunge state)
                   if (_state == FishingState.nibbling && _hasBobberSubmerged)
                     Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+                      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
                       decoration: BoxDecoration(
-                        color: const Color(0xFFFF1744).withValues(alpha: 0.9),
-                        borderRadius: BorderRadius.circular(20),
-                        boxShadow: const [BoxShadow(color: Colors.red, blurRadius: 20)],
+                        color: const Color(0xFFFF1744),
+                        borderRadius: BorderRadius.circular(24),
+                        boxShadow: const [BoxShadow(color: Colors.redAccent, blurRadius: 25)],
                       ),
                       child: const Text(
-                        '⚡ FLICK UPWARD TO SET HOOK! ⚡',
-                        style: TextStyle(color: Colors.white, fontWeight: FontWeight.w900, fontSize: 15),
+                        '⚡ TAP ANYWHERE TO SET HOOK! ⚡',
+                        style: TextStyle(color: Colors.white, fontWeight: FontWeight.w900, fontSize: 16),
                       ),
                     ),
 
@@ -539,89 +540,172 @@ class _FishingScreenState extends State<FishingScreen> with SingleTickerProvider
                           children: [
                             Text(_equippedBait.icon, style: const TextStyle(fontSize: 16)),
                             const SizedBox(width: 8),
-                            Text('Lure: ${_equippedBait.name} (Tap to twitch)', style: const TextStyle(color: Colors.white70, fontSize: 12)),
+                            Text('Lure: ${_equippedBait.name} (Tap to twitch line)', style: const TextStyle(color: Colors.white70, fontSize: 12)),
                           ],
                         ),
                       ),
                     ),
 
                   // Bottom Dock Controls
-                  _buildBottomDockControls(),
+                  if (_state != FishingState.reelingFight) _buildBottomDockControls(),
                 ],
               ),
             ),
           ),
 
-          // Two-Handed Touch Overlay
+          // Two-Handed Touch Controls during Reeling Fight
           if (_state == FishingState.reelingFight) ...[
-            // Left Thumb Area: Steering
+            // Left Side: Easy Steering Buttons
             Positioned(
               left: 20,
-              bottom: 120,
-              child: GestureDetector(
-                onPanUpdate: (d) {
-                  setState(() {
-                    _rodSteerAngle = (_rodSteerAngle + d.delta.dx * 0.02).clamp(-1.0, 1.0);
-                  });
-                },
-                child: Container(
-                  width: 100,
-                  height: 100,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: Colors.white.withValues(alpha: 0.15),
-                    border: Border.all(color: Colors.white30, width: 2),
+              bottom: 40,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Text('ROD STEERING', style: TextStyle(color: Colors.white70, fontSize: 11, fontWeight: FontWeight.bold, letterSpacing: 1.2)),
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      // Steer Left Button
+                      GestureDetector(
+                        onTapDown: (_) {
+                          HapticFeedback.lightImpact();
+                          setState(() => _rodSteerAngle = -0.85);
+                        },
+                        onTapUp: (_) => setState(() => _rodSteerAngle = 0.0),
+                        onTapCancel: () => setState(() => _rodSteerAngle = 0.0),
+                        child: Container(
+                          width: 65,
+                          height: 65,
+                          decoration: BoxDecoration(
+                            color: _rodSteerAngle < -0.2 ? const Color(0xFF00E5FF) : const Color(0xFF1E2838),
+                            borderRadius: BorderRadius.circular(16),
+                            border: Border.all(color: const Color(0xFF00E5FF)),
+                          ),
+                          child: Center(
+                            child: Icon(
+                              Icons.arrow_back_ios_new,
+                              color: _rodSteerAngle < -0.2 ? Colors.black : Colors.white,
+                              size: 26,
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      // Steer Right Button
+                      GestureDetector(
+                        onTapDown: (_) {
+                          HapticFeedback.lightImpact();
+                          setState(() => _rodSteerAngle = 0.85);
+                        },
+                        onTapUp: (_) => setState(() => _rodSteerAngle = 0.0),
+                        onTapCancel: () => setState(() => _rodSteerAngle = 0.0),
+                        child: Container(
+                          width: 65,
+                          height: 65,
+                          decoration: BoxDecoration(
+                            color: _rodSteerAngle > 0.2 ? const Color(0xFF00E5FF) : const Color(0xFF1E2838),
+                            borderRadius: BorderRadius.circular(16),
+                            border: Border.all(color: const Color(0xFF00E5FF)),
+                          ),
+                          child: Center(
+                            child: Icon(
+                              Icons.arrow_forward_ios,
+                              color: _rodSteerAngle > 0.2 ? Colors.black : Colors.white,
+                              size: 26,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
                   ),
-                  child: const Center(
-                    child: Text('STEER\nROD', textAlign: TextAlign.center, style: TextStyle(color: Colors.white70, fontSize: 11, fontWeight: FontWeight.bold)),
-                  ),
-                ),
+                ],
               ),
             ),
 
-            // Right Thumb Area: Circular Reel Spool
+            // Right Side: Press-and-Hold Reel Button (With spinning spool!)
             Positioned(
               right: 20,
-              bottom: 120,
-              child: GestureDetector(
-                onPanStart: (d) => _crankCenter = d.localPosition,
-                onPanUpdate: _onReelCrankPanUpdate,
-                child: Container(
-                  width: 120,
-                  height: 120,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    gradient: const RadialGradient(colors: [Color(0xFF37474F), Color(0xFF212121)]),
-                    border: Border.all(color: const Color(0xFF00E5FF), width: 3),
-                    boxShadow: const [BoxShadow(color: Colors.black54, blurRadius: 15)],
-                  ),
-                  child: Center(
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Transform.rotate(
-                          angle: _lastCrankAngle,
-                          child: const Icon(Icons.rotate_right, color: Color(0xFF00E5FF), size: 40),
+              bottom: 30,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Text('REEL CONTROL', style: TextStyle(color: Colors.white70, fontSize: 11, fontWeight: FontWeight.bold, letterSpacing: 1.2)),
+                  const SizedBox(height: 8),
+                  GestureDetector(
+                    onTapDown: (_) {
+                      HapticFeedback.mediumImpact();
+                      setState(() => _isHoldingReel = true);
+                    },
+                    onTapUp: (_) {
+                      setState(() => _isHoldingReel = false);
+                    },
+                    onTapCancel: () {
+                      setState(() => _isHoldingReel = false);
+                    },
+                    child: AnimatedContainer(
+                      duration: const Duration(milliseconds: 150),
+                      width: 120,
+                      height: 120,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        gradient: RadialGradient(
+                          colors: _isHoldingReel
+                              ? [const Color(0xFF00E5FF), const Color(0xFF0091EA)]
+                              : [const Color(0xFF37474F), const Color(0xFF1E2838)],
                         ),
-                        const Text('CRANK', style: TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold)),
-                      ],
+                        border: Border.all(
+                          color: _tension > 0.80 ? const Color(0xFFFF1744) : const Color(0xFF00E5FF),
+                          width: 4,
+                        ),
+                        boxShadow: [
+                          BoxShadow(
+                            color: _isHoldingReel
+                                ? const Color(0xFF00E5FF).withValues(alpha: 0.6)
+                                : Colors.black54,
+                            blurRadius: _isHoldingReel ? 25 : 12,
+                            spreadRadius: _isHoldingReel ? 3 : 1,
+                          ),
+                        ],
+                      ),
+                      child: Center(
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Transform.rotate(
+                              angle: _reelVisualAngle,
+                              child: Icon(
+                                Icons.rotate_right,
+                                color: _isHoldingReel ? Colors.black : const Color(0xFF00E5FF),
+                                size: 48,
+                              ),
+                            ),
+                            const SizedBox(height: 2),
+                            Text(
+                              _isHoldingReel ? 'REELING!' : 'HOLD TO\nREEL',
+                              textAlign: TextAlign.center,
+                              style: TextStyle(
+                                color: _isHoldingReel ? Colors.black : Colors.white,
+                                fontSize: 11,
+                                fontWeight: FontWeight.w900,
+                                letterSpacing: 1,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
                     ),
                   ),
-                ),
+                ],
               ),
             ),
           ],
 
-          // Single Tap to Set Hook (Left Thumb flick area during strike)
+          // Tap Anywhere to Hook when Fish Strikes!
           if (_state == FishingState.nibbling && _hasBobberSubmerged)
             Positioned.fill(
               child: GestureDetector(
                 behavior: HitTestBehavior.opaque,
-                onVerticalDragUpdate: (d) {
-                  if (d.delta.dy < -5) {
-                    _setHook();
-                  }
-                },
                 onTap: _setHook,
               ),
             ),
@@ -632,18 +716,24 @@ class _FishingScreenState extends State<FishingScreen> with SingleTickerProvider
 
   Widget _buildFightTensionGauge() {
     Color gaugeColor = const Color(0xFF81C784); // Green optimal
-    if (_tension < 0.25) {
+    String statusTitle = '🟢 OPTIMAL TENSION — KEEP HOLDING REEL!';
+
+    if (_tension < 0.15) {
       gaugeColor = const Color(0xFFFFD54F); // Yellow slack
-    } else if (_tension > 0.75) {
+      statusTitle = '⚠️ LINE TOO SLACK! HOLD REEL TO TIGHTEN!';
+    } else if (_tension > 0.80) {
       gaugeColor = const Color(0xFFFF1744); // Red snapping
+      statusTitle = '⚠️ STRAIN HIGH! RELEASE REEL FOR A SECOND!';
     }
+
+    final isDanger = _tension > 0.85 || (_tension < 0.12 && _fishDistanceMeters > 2.0);
 
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
       decoration: BoxDecoration(
-        color: Colors.black.withValues(alpha: 0.8),
+        color: Colors.black.withValues(alpha: 0.85),
         borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: gaugeColor.withValues(alpha: 0.6)),
+        border: Border.all(color: gaugeColor.withValues(alpha: 0.8), width: 1.5),
       ),
       child: Column(
         children: [
@@ -651,11 +741,11 @@ class _FishingScreenState extends State<FishingScreen> with SingleTickerProvider
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
               Text(
-                _tension > 0.75 ? '⚠️ STRAIN WARNING!' : (_tension < 0.25 ? '⚠️ SLACK LINE!' : 'OPTIMAL TENSION'),
+                statusTitle,
                 style: TextStyle(color: gaugeColor, fontWeight: FontWeight.bold, fontSize: 11),
               ),
               Text(
-                'Distance: ${_fishDistanceMeters.toStringAsFixed(1)} m',
+                '${_fishDistanceMeters.toStringAsFixed(1)} m left',
                 style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 13),
               ),
             ],
@@ -670,7 +760,51 @@ class _FishingScreenState extends State<FishingScreen> with SingleTickerProvider
               valueColor: AlwaysStoppedAnimation<Color>(gaugeColor),
             ),
           ),
+          if (isDanger) ...[
+            const SizedBox(height: 6),
+            Text(
+              '⚠️ DANGER! Fish escaping in ${_escapeGraceTimer.toStringAsFixed(1)}s!',
+              style: const TextStyle(color: Color(0xFFFF5252), fontSize: 11, fontWeight: FontWeight.bold),
+            ),
+          ],
         ],
+      ),
+    );
+  }
+
+  Widget _buildSteeringGuidanceBanner() {
+    // Check which way fish is running
+    final fishRunningLeft = _fishLateralOffset < -0.15;
+    final fishRunningRight = _fishLateralOffset > 0.15;
+
+    String guideText = '🐟 Fish is centered. Keep holding reel!';
+    Color guideColor = const Color(0xFF00E5FF);
+
+    if (fishRunningLeft) {
+      guideText = '◀◀ FISH RUNNING LEFT! TAP RIGHT STEER! ◀◀';
+      guideColor = const Color(0xFFFFB300);
+    } else if (fishRunningRight) {
+      guideText = '▶▶ FISH RUNNING RIGHT! TAP LEFT STEER! ▶▶';
+      guideColor = const Color(0xFFFFB300);
+    }
+
+    final isCountering = (_rodSteerAngle * _fishLateralOffset) < -0.1;
+    if (isCountering) {
+      guideText = '🎯 COUNTERED! Fish is tiring out fast!';
+      guideColor = const Color(0xFF81C784);
+    }
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+      decoration: BoxDecoration(
+        color: guideColor.withValues(alpha: 0.2),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: guideColor.withValues(alpha: 0.5)),
+      ),
+      child: Text(
+        guideText,
+        textAlign: TextAlign.center,
+        style: TextStyle(color: guideColor, fontWeight: FontWeight.bold, fontSize: 11.5),
       ),
     );
   }

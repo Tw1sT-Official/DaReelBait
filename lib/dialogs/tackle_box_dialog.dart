@@ -31,7 +31,7 @@ class _TackleBoxDialogState extends State<TackleBoxDialog> with SingleTickerProv
 
     final ownedRods = EquipmentDatabase.allRods.where((r) => ownedItems.contains(r.id)).toList();
     final ownedLines = EquipmentDatabase.allLines.where((l) => ownedItems.contains(l.id)).toList();
-    final ownedBaits = EquipmentDatabase.allBaits.where((b) => (baitInventory[b.id] ?? 0) > 0).toList();
+    final ownedBaits = EquipmentDatabase.allBaits.where((b) => AnglerStorage.isInfiniteBait(b.id) || (baitInventory[b.id] ?? 0) > 0).toList();
 
     return Dialog(
       backgroundColor: const Color(0xFF14141E),
@@ -91,7 +91,12 @@ class _TackleBoxDialogState extends State<TackleBoxDialog> with SingleTickerProv
                             child: ListTile(
                               leading: Text(bait.icon, style: const TextStyle(fontSize: 24)),
                               title: Text(bait.name, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-                              subtitle: Text('$count remaining • ${bait.description}', style: const TextStyle(color: Colors.grey, fontSize: 11)),
+                              subtitle: Text(
+                                AnglerStorage.isInfiniteBait(bait.id)
+                                    ? '∞ Unlimited (Free Starter Bait) • ${bait.description}'
+                                    : '$count remaining • ${bait.description}',
+                                style: const TextStyle(color: Colors.grey, fontSize: 11),
+                              ),
                               trailing: ElevatedButton(
                                 style: ElevatedButton.styleFrom(
                                   backgroundColor: isEquipped ? const Color(0xFF00E5FF) : Colors.white12,
