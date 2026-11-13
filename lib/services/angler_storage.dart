@@ -35,7 +35,6 @@ class AnglerStorage {
         'line_mono',
         'earthworms',
         'bread_dough',
-        'tool_scale_tape',
       ]);
       await _prefs!.setString(_keyEquippedRod, 'rod_bamboo');
       await _prefs!.setString(_keyEquippedLine, 'line_mono');
@@ -103,7 +102,7 @@ class AnglerStorage {
     return getOwnedItems().contains(itemId);
   }
 
-  static bool hasScaleAndTape() => true; // Scale & Tape are free by default so player can always inspect stats!
+  static bool hasScaleAndTape() => hasItem('tool_scale_tape');
   static bool hasCamera() => hasItem('tool_camera');
   static bool hasLogbook() => hasItem('tool_logbook');
   static bool hasDiary() => hasItem('tool_diary');
